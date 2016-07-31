@@ -9,3 +9,4 @@ newline
 branch line
 
 diff branch
+newnew
