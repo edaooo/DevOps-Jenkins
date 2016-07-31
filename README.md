@@ -1,7 +1,7 @@
 testrepo
 ========
-test line1
+testline1  
+##testline2
 
-  testline2
-  
-*** testline3
+testline3  
+testline4
