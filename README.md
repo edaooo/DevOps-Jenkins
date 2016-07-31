@@ -7,3 +7,5 @@ testline3
 testline4
 newline
 branch line
+
+diff branch
