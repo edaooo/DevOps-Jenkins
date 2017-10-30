@@ -1,0 +1,113 @@
+#!groovy
+pipeline {
+    agent{node {label 'master'}}
+    stages {
+                stage("Update properties.xml"){
+            steps{
+                echo "---------------------------------Update properties.xml---------------------------------"
+                sh """
+                export PATH=$PATH
+                svn co https://fndsvn.dev.activenetwork.com/foundations/infrastructure/Deployment-Infrastructure/trunk/config --username svcsvnldap
+                cp -f config/properties.xml /opt/active/user/deploy/Deployment-Infrastructure/config/
+                """
+                echo "----------------------------------------Done-------------------------------------------"
+            }
+        }
+        
+        // stage("Checkout camps aui code "){
+        //     steps{
+        //         script{
+        //             echo "---------------------------------Checkout ${env.APPNAME} from gitlab---------------------------------"
+        //             dir ("${env.WORKSPACE}/${env.APPNAME}") {
+        //                 git branch: "${env.BRANCH}", url: "git@gitlab.dev.activenetwork.com:ActiveWorks-Camps/fnd-webserver-camps.git"
+        //                 }
+        //             echo "-------------------------------------------Done----------------------------------------------"
+        //         }
+        //     }
+        // }
+        stage("Build camps-aui"){
+           steps{
+               echo "-----------------------------Build ${env.APPNAME} code from gitlab----------------------------"
+               sh """
+               sh /opt/active/user/deploy/Deployment-Infrastructure/bin/ReleaseBuildGitlab-camps.sh
+               """
+           }
+        }
+        stage("Deploy camps-aui INT"){
+            steps{
+                echo "------------------------------Promote-INT--------------------------------"
+                script{
+                    env['VERSION'] = '';
+                    def camps_ui_ver = sh script: "cat fnd-webserver-camps/version.properties |grep VERSION |awk -F '=' '{ print \$2 }' | tr '\n' ' ' | sed 's/ \$//'", returnStdout: true
+                    env['VERSION'] = camps_ui_ver
+                    currentBuild.displayName = "${env.ENV}--${env.VERSION}--${env.CAMPS_UI_VERSION}"
+                }
+                sh """
+                perl /opt/active/user/deploy/Deployment-Infrastructure/bin/serverhash.pl -env=${env.ENV} -app=${env.APPNAME} -servfile=${env.WORKSPACE}/${env.APPNAME}
+                /opt/active/user/deploy/Deployment-Infrastructure/bin/NoDowntimeDeploy.sh ${env.WORKSPACE} ${env.APPNAME} ${env.VERSION} ${env.ENV} 0
+                """
+            }
+            
+        }
+        stage("Cleanup"){
+            steps{
+                sh "rm -rf ${env.WORKSPACE}/camps-ui"
+            }
+        }
+        stage("Checkout playbook"){
+            steps{
+                echo "-------------------------Checkout camps-ui playbook from gitlab-------------------------"            
+                dir ("${env.WORKSPACE}/Ansible-ActiveWorks") {
+                git branch: 'camps', url: 'git@gitlab.dev.activenetwork.com:scm/Ansible-ActiveWorks.git'
+            }
+            echo "---------------------------------------Done-------------------------------------------"
+            }
+        } 
+        stage("Checkout camps-ui code"){
+            steps{
+                echo "-------------------------Checkout camps-ui source code from gitlab-------------------------"
+                dir ("${env.WORKSPACE}/camps-ui") {
+                    git branch: "${env.CAMPS_UI_BRANCH}", url: 'git@gitlab.dev.activenetwork.com:ActiveWorks-Camps/camps-ui.git'
+                }
+                echo "----------------------------------------Done----------------------------------------------"
+            }
+        }
+        stage ('Build camps-ui ') {
+            steps{
+                nodejs(nodeJSInstallationName: 'NodeJS-6.11') {
+                    sh 'npm --version'
+                    echo "-----------------------------------Camps-ui Build------------------------------------"
+                echo env.PATH
+                sh """
+                cd ${env.WORKSPACE}/camps-ui
+                npm --version
+                node --version
+                npm install
+                #npm run release -- --release-version=patch
+                yarn release -- --release-version=patch --branch=${CAMPS_UI_BRANCH}
+                """
+                script{
+                    env['CAMPS_UI_VERSION'] = '';
+                    def camps_ui_ver = sh script: "cat camps-ui/package.json |grep version |awk -F ': ' '{print \$2}' | sed 's/,//g' |sed 's/\"//g'", returnStdout: true
+                    env['CAMPS_UI_VERSION'] = camps_ui_ver
+                    currentBuild.displayName = "${env.ENV}--${env.VERSION}--${env.CAMPS_UI_VERSION}"
+                }
+                echo "---------------------------------------Done-------------------------------------------"
+                }
+
+            }
+        }
+        stage("Deploy camps-ui INT"){
+             steps{
+                echo "-----------------------------CAMPS-UI deploy-${env.ENV}-${env.CAMPS_UI_VERSION}-----------------------------"
+                sh """
+                source $HOME/.virtualenvs/ansible_v2/bin/activate
+                cd ${env.WORKSPACE}/Ansible-ActiveWorks/active-playbook-camps-ui/
+                ansible --version
+                ansible-playbook -i inventory/${env.ENV} ./deploy.yml -e project=${env.APPNAME} -e env=${env.ENV} -e branch=${env.CAMPS_UI_BRANCH} -e workspace=${env.WORKSPACE} -e jenkins_home=${env.JENKINS_HOME} -e camps_ui_version=${env.CAMPS_UI_VERSION}
+                """
+                echo "-------------------------------------Done------------------------------------------"
+            }
+        }
+    }
+}
