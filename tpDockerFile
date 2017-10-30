@@ -1,0 +1,12 @@
+FROM ruby:2.1.10
+RUN apt-get update -qq
+RUN apt-get install -y build-essential mysql-client libmagickwand-dev nodejs liblzma-dev zlib1g-dev libxslt1-dev libxml2-dev net-tools
+RUN mkdir -p /run/teampages
+ENV APP_HOME /teampages
+RUN mkdir -p $APP_HOME
+WORKDIR $APP_HOME
+ADD Gemfile* $APP_HOME/
+RUN ls -a $APP_HOME
+RUN bundle config github.https true
+RUN bundle install --clean --jobs=2 --retry=3 --without test ci_test
+ADD . $APP_HOME
