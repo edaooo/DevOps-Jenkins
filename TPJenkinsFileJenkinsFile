@@ -1,0 +1,108 @@
+rubyVersion = "2.1.10"
+sourceBranch = env.gitlabSourceBranch ?: "master"
+DASHBOARD_SANDI_METER_URI = 'http://tmpgs-jenkinsm-01w.dev.activenetwork.com:3030/widgets/sandi-meter'
+DASHBOARD_COVERAGE_URI = 'http://tmpgs-jenkinsm-01w.dev.activenetwork.com:3030/widgets/test-coverage'
+currentBuild.displayName = sourceBranch
+DASHBOARD_TOKEN = "b2e40c30-6f69-0135-afe7-28cfe916bbe9"
+
+node {
+  //////////////////////////////////////////////////////////////////////////////
+  stage "Checkout"
+  checkout scm
+  installRuby(rubyVersion)
+  //////////////////////////////////////////////////////////////////////////////
+
+  //////////////////////////////////////////////////////////////////////////////
+  stage "build"
+  rvm "bundle config --local path vendor/builder && bundle config --local github.https true"
+  rvm "bundle install --without=development"
+  rvm "cp config/database.yml.ci config/database.yml"
+  sh "rm log/test.log || true"
+  sh "rm -rf test/reports || true"
+  sh "mkdir -p test/reports"
+  //////////////////////////////////////////////////////////////////////////////
+
+  //////////////////////////////////////////////////////////////////////////////
+  stage "Migrations" 
+  env.RAILS_ENV = "test"
+  env.MYSQL_SOCKET = "/opt/active/mysql/mysql.sock"
+  bundle_exec "rake db:migrate"
+  bundle_exec "rake db:seed"
+  //////////////////////////////////////////////////////////////////////////////
+
+  //////////////////////////////////////////////////////////////////////////////
+
+  // While test time hovers around 30 minutes, kick off staging deployments
+  // BEFORE tests, to get it on staging server quicker.  Bad solution to problem
+  // of slow tests...
+
+  if(sourceBranch == "staging") {
+    stage("staging release") {
+      env.BRANCH_TO_DEPLOY = sourceBranch
+      env.CAP_COPY_CACHE = "/opt/active/deploy_cache/teampages"
+      env.CAP_COPY_DIR = "/opt/active/deploy_cache/copy_dir"
+      bundle_exec("cap staging deploy")
+    }
+  }
+  //////////////////////////////////////////////////////////////////////////////
+
+  //////////////////////////////////////////////////////////////////////////////
+  stage "Test"
+  try {
+    env.NO_AIRBRAKE = "1"
+    env.NO_PAYMENT_API_TEST = "1"
+    env.DISABLE_SPAM_CLASSIFIER = "1"
+    env.SKIP_BORKED_TESTS = "1"
+    env.RAILS_ENV = "test"
+
+    if(!env.gitlabSourceBranch) {
+      // If build is not coming from gitlab, it's the nightly scheduled one; 
+      // check coverage 
+      env.COVERAGE = 1
+    }
+    env.MYSQL_SOCKET = "/opt/active/mysql/mysql.sock"
+
+    sh "env"
+    bundle_exec "rake --trace test:ci"
+    if(!env.gitlabSourceBranch) {
+      setTestCoverage("master")
+      setSandiStats("master")
+        publishHTML (target: [allowMissing: false,
+                              alwaysLinkToLastBuild: false,
+                              keepAll: true,
+                              reportDir: 'coverage',
+                              reportFiles: 'index.html',
+                              reportName: "Coverage Report"])
+    }
+  } finally {
+    junit 'test/reports/*.xml,spec/reports/*.xml'
+  }
+  //////////////////////////////////////////////////////////////////////////////
+
+  //stage( "Cleanup" ) {
+  //  rvm "bin/remove_mogile_files"
+  //} 
+}
+
+def bundle_exec(String commands) {
+  rvm "bundle exec ${commands}"
+}
+
+def rvm(String commands) {
+  sh "bash -c 'source /usr/local/rvm/scripts/rvm && rvm use ${rubyVersion} && ${commands}'"
+}
+
+def junit( String path ) {
+    step([$class: 'JUnitResultArchiver', testResults: path])
+}
+def installRuby(String version) {
+  sh "bash -c 'source /usr/local/rvm/scripts/rvm && rvm install ${version} && rvm cleanup all'"
+}
+
+def setTestCoverage(String branch) {
+ sh "cat coverage/coverage.json | jq -M -c '{\"metrics\": .metrics}' | jq -M -c '.+={\"auth_token\": \"${DASHBOARD_TOKEN}\", \"branch\": \"${branch}\"}' | curl -d @- ${DASHBOARD_COVERAGE_URI}"
+}
+def setSandiStats(String branch) {
+  rvm("gem install sandi_meter")
+  rvm("sandi_meter --json | jq -M -c \".+={\\\"auth_token\\\": \\\"${DASHBOARD_TOKEN}\\\", \\\"branch\\\": \\\"${branch}\\\"}\" | curl -d @- ${DASHBOARD_SANDI_METER_URI}")
+}
