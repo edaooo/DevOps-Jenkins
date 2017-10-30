@@ -1,0 +1,49 @@
+pipeline {
+    agent any 
+    stages {
+        stage('Checkout Code') {
+            steps {
+                script{
+                echo "---------------------------------Checkout code from gitlab---------------------------------"
+                sh "rm -rf ${env.WORKSPACE}/${env.APPNAME}"
+                if ("${env.BRANCH}") {
+                    dir ("${env.WORKSPACE}/${env.APPNAME}") {
+                        git branch: "${env.BRANCH}", url: "${env.GITPATH}"
+                    }
+                }
+                else {
+                    dir ("${env.WORKSPACE}/${env.APPNAME}") {
+                        git url: "${env.GITPATH}"
+                    }
+                }
+                echo "-------------------------------------------Done----------------------------------------------"
+            }
+            }
+        }
+        stage('prepareAppVersion') {
+            steps {
+                sh "cp ${env.WORKSPACE}/${env.APPNAME}/config/application.properties ${env.WORKSPACE}/${env.APPNAME}/"
+                sh "cp -f ${env.WORKSPACE}/${env.APPNAME}/config/application.properties /opt/active/user/deploy/jobs/commerce-admin-main/workspace/"
+
+                script {
+                    def props = readProperties file: "${env.WORKSPACE}/${env.APPNAME}/application.properties";
+                    env['VERSION'] = props['version']
+                    currentBuild.displayName = props['version']
+                }
+                echo "VERSION:${env.VERSION}"
+            }
+            }
+        stage('Build') {
+            steps {
+                dir ("${env.WORKSPACE}/${env.APPNAME}") {
+                sh "./gradlew publish"
+            }
+            }
+        }
+        stage ('Starting promotion jobs') {
+            steps {
+                build job: 'commerce-admin-main'
+            }
+        }
+    }
+}
