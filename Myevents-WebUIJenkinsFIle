@@ -1,0 +1,91 @@
+pipeline {
+    agent any 
+    
+    environment {
+        PATH="/opt/active/user/deploy/tools/jenkins.plugins.nodejs.tools.NodeJSInstallation/NodeJS/bin:/sbin:/usr/sbin:/bin:/usr/bin"
+    }
+    
+    
+    stages {
+        stage("Update properties.xml"){
+          steps{
+            echo "---------------------------------Update properties.xml---------------------------------"
+            sh """
+            export PATH=$PATH
+            svn co https://fndsvn.dev.activenetwork.com/foundations/infrastructure/Deployment-Infrastructure/trunk/config --username svcsvnldap
+            cp -f config/properties.xml /opt/active/user/deploy/Deployment-Infrastructure/config/
+            """
+            echo "----------------------------------------Done-------------------------------------------"
+          }
+        }
+
+        stage('Checkout Code') {
+            steps {
+                script{
+                echo "---------------------------------Checkout code from gitlab---------------------------------"
+                sh "rm -rf ${env.WORKSPACE}/${env.APPNAME}"
+                if ("${env.BRANCH}") {
+                    dir ("${env.WORKSPACE}/${env.APPNAME}") {
+                        git branch: "${env.BRANCH}", url: "${env.GITPATH}"
+                    }
+                }
+                else {
+                    dir ("${env.WORKSPACE}/${env.APPNAME}") {
+                        git url: "${env.GITPATH}"
+                    }
+                }
+                echo "-------------------------------------------Done----------------------------------------------"
+            }
+            }
+        }
+/*
+        stage('SonarQube analysis') {
+          steps {
+            script {
+              scannerHome = tool 'sonarscanner2.9'
+            }
+            withSonarQubeEnv('SonarQube') {
+              sh "${scannerHome}/bin/sonar-scanner"
+            }
+          }
+        }
+*/     
+        stage("Build"){
+        steps{
+            echo "-----------------------------Build ${env.APPNAME} code from gitlab----------------------------"
+//            echo "Node Version:" npm -v
+//            echo "NPM Version:"`npm -v`
+            sh """
+            export ANT_OPTS="-Xmx512m -XX:MaxPermSize=256m"
+            export JAVA_HOME="/usr/java/jdk1.8.0_144"
+            export CI=true 
+            sh /opt/active/user/deploy/Deployment-Infrastructure/bin/ReleaseBuildGitlab.sh
+            """
+            echo "-------------------------------------------Build Complete----------------------------------------------"
+             }
+        }
+        
+        stage("Set build name"){
+        steps{
+            script {
+                    def props = readProperties file: "${env.WORKSPACE}/${env.APPNAME}/version.properties";
+                    env['VERSION'] = props['VERSION'] 
+                    currentBuild.displayName = "${env.VERSION}"
+            //        sh "cp -f ${env.WORKSPACE}/${env.APPNAME}/version.properties /opt/active/user/deploy/jobs/myevents-webui-promotion/workspace/"
+            }
+            echo "${env.APPNAME} version is ${env.VERSION}"
+            echo "-------------------------------------Done-------------------------------------"
+        }
+        }
+
+
+
+  /*
+        stage ('Starting promotion jobs') {
+            steps {
+                build job: 'myevents-webui-promotion'
+            }
+        }
+    */    
+    }
+}
