@@ -1,0 +1,120 @@
+rubyVersion = "2.1.10"
+String[] targets = [ "production", "ci", "staging" ] as String[];
+
+
+node {
+  //////////////////////////////////////////////////////////////////////////////
+  stage "Checkout"
+
+  def details = input( id: 'userInput', message: 'Please enter the source branch to use.  Production deploys must use "master".',
+    parameters: [ [$class: 'StringParameterDefinition', defaultValue: 'master', description: 'Source Branch', name: 'branch'],
+                  [$class: 'ChoiceParameterDefinition', name: 'target', choices: "ci\nstaging\nproduction\nint_01\nactive-staging", description: 'Deployment target host(s)'],
+                  [$class: 'BooleanParameterDefinition', defaultValue: false, description: 'Also perform migrations?', name: 'runMigrations']
+                ] )
+  if(details['target'] == 'production') {
+    details['target'] = 'rackspace'
+  }
+  if (details['target'] == 'rackspace' && details['branch'] != 'master') {
+    die('You cannot deploy a non master branch to production servers.')
+  }
+  //slackSend(color: '#FFFF00', message: "STARTED: ${details['branch']} out to ${details['target']} - ${env.BUILD_URL}")
+
+
+  currentBuild.displayName = "Deploy: ${details['branch']} to ${details['target']}"
+  checkout([$class: 'GitSCM',
+           branches: [[name: "*/${details['branch']}"]],
+           doGenerateSubmoduleConfigurations: scm.doGenerateSubmoduleConfigurations,
+           extensions: scm.extensions,
+           userRemoteConfigs: scm.userRemoteConfigs ])
+
+  installRuby(rubyVersion)
+  rvm "bundle config --local path vendor/builder && bundle config --local github.https true && bundle install"
+
+  // While test time hovers around 30 minutes, kick off deployments
+  // without tests
+
+  stage("deploy") {
+    if( details['target'] == "ci" ) {
+      dockerDeploy(details['branch'], details['target'], details['runMigrations']);
+    }
+    else
+    {
+      env.BRANCH_TO_DEPLOY = details['branch']
+      env.CAP_COPY_CACHE = "/opt/active/deploy_cache/teampages_deploy"
+      env.CAP_COPY_DIR = "/opt/active/deploy_cache/copy_dir_deploy"
+      env.SSH_CONFIG_FILE = "deploy/ssh_config"
+      if( details['runMigrations']) {
+        bundle_exec("cap ${details['target']} deploy:migrations")
+      }
+      else {
+        bundle_exec("cap ${details['target']} deploy")
+      }
+    }
+    emailext (
+          subject: "TeamPages Deployment: ${details['target']}",
+          body: """<html><body><p>A deployment has just completed to ${details['target']}!</p></body></html>""",
+          mimeType: "text/html",
+          recipientProviders: [[$class: 'RequesterRecipientProvider']],
+          from: "Jenkins CI <dev@teampages.com>",
+          to: "TeamPages QA <teampagesqa@activenetwork.com>, TeamPages Dev <TeamPagesDev@activenetwork.com>")
+
+  }
+}
+
+def bundle_exec(String commands) {
+  rvm "bundle exec ${commands}"
+}
+
+def rvm(String commands) {
+  sh "bash -c 'source /usr/local/rvm/scripts/rvm && rvm use ${rubyVersion} && ${commands}'"
+}
+
+def installRuby(String version) {
+  sh "bash -c 'source /usr/local/rvm/scripts/rvm && rvm install ${version} && rvm cleanup all'"
+}
+
+def cleanDocker(){
+      //////////////////////////////////////////////////////////////////////////
+      // CLEAN UP DOCKER
+      //////////////////////////////////////////////////////////////////////////
+      sh("sudo docker rm \$(sudo docker ps -qa --no-trunc --filter \"status=exited\") || true")
+      sh("sudo docker rmi \$(sudo docker images --filter \"dangling=true\" -q --no-trunc) || true")
+}
+
+def dockerDeploy(String branch, String target, Boolean runMigrations) {
+      docker_tag = "teampages-dev:${branch}"
+      container_name = "teampages_dev"
+      db = "teampages_dev_${branch}"
+      result = sh("cp config/database.yml.vars config/database.yml")
+      result = sh("cp config/environments/development.rb.ci config/environments/development.rb")
+      cleanDocker()
+
+      sh("sudo docker build  -t ${docker_tag} --quiet .")
+      sh("sudo docker stop ${container_name} || true")
+      sh("sudo docker rm ${container_name} || true")
+      
+      // This *should be host specific; currently we just support docker to the
+      // CI server, but eventually we'll need to add a push to artifactory, and
+      // different scripting (k8s)
+
+      if(runMigrations) {
+        sh("sudo docker run -v /opt/active/mysql/mysql.sock:/var/run/mysqld/mysqld.sock -e \"DATABASE_NAME=${db}\" -e DATABASE_USER=root ${docker_tag} rake db:migrate db:seed")
+      }
+      setupMogileFs("teampages_${branch}")
+      sh("sudo docker run --add-host=mog_storage_1:172.17.42.1 -e ACTIVE_PASSPORT_ENVIRONMENT=qa -e GOON_URI=172.17.42.1:8081 -e TIMEOUT=60 -e DISABLE_SPAM_CLASSIFIER=1 -e MOG_HOSTS=mog_storage_1:7001 -e MOG_DOMAIN=teampages_${branch} -e PRIMARY_DOMAIN=tmpgs-jenkinsm-01w.dev.activenetwork.com --name=${container_name} -v /opt/active/mysql/mysql.sock:/var/run/mysqld/mysqld.sock -d -e DATABASE_NAME=\"${db}\" -e DATABASE_USER=root --restart=always -p 80:3000 --expose=3000 ${docker_tag} rails s -p 3000")
+      sh("sudo docker exec ${container_name} rake assets:precompile")
+
+}
+
+def setupMogileFs(String mogDomain){
+  sh("/usr/local/bin/mogadm domain add ${mogDomain} || true")
+
+  ["AnnouncementImage", "BackgroundImage",
+  "BannerTemplate", "CustomPageUpload", "Document", "HeaderFile",
+  "NewProfileImage", "ResizedAnnouncementImage", "SeasonBackup", "SponsorImage",
+  "ThemePicture", "UploadedFile", "bad_uploads", "cache", "calendar",
+  "cityList", "customBanners", "default", "imageConversion", "lookAndFeel",
+  "single_events", "sitemap", "standings", "tempReceipt", "theme_file"].each { mogClass ->
+    sh("/usr/local/bin/mogadm class add ${mogDomain} ${mogClass} || true")
+  }
+}
