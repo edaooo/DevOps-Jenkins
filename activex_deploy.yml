@@ -1,0 +1,205 @@
+---
+- hosts: '{{ hosts }}'
+  become: yes
+  become_method: sudo
+  any_errors_fatal: true
+  gather_facts: '{{ gather_facts }}'
+
+  vars_prompt:
+    - name: "hosts"
+      prompt: "\n\n What hosts are you deploying to? \n"
+      default: "activex-prod-servers"
+      private: no
+    - name: "gather_facts"
+      prompt: "\n\n Gather facts for deployment servers? \n"
+      default: no
+      private: no
+    - name: "deployer"
+      prompt: "\n\n Who is currently deploying (user Slack username example @djowinz)? \n"
+      private: no
+    - name: "message"
+      prompt: "\n\n Please describe what you are deploying \n"
+      private: no
+    - name: "project"
+      prompt: "\n\n What project would you like to deploy? (Don't include .git to the end of the Bitbucket / Git project name) \n"
+      default: "activex-api"
+      private: no
+    - name: "branch"
+      prompt: "\n\n What branch would you like to deploy? \n"
+      default: "master"
+      private: no
+    - name: "location"
+      prompt: "\n\n Where do you want to put this on the remote server? \n"
+      default: "activex-api-v2"
+      private: no
+    - name: "update"
+      prompt: "\n\n Do you want to update or overwrite? yes/no \n"
+      default: yes
+      private: no
+    - name: "migrations"
+      prompt: "\n\n Do you want to run migrations? \n"
+      default: yes
+      private: no
+    - name: "ssh_key_path"
+      prompt: "\n\n What SSH key do you want to use? \n"
+      default: "/root/.ssh/git_id_rsa"
+      private: no
+    - name: "rebuildes"
+      prompt: "\n\n Would you like to rebuild ElasticSearch indexes? \n"
+      default: no
+      private: no
+    - name: "self_update_composer"
+      prompt: "\n\n Would you like to check if composer needs to update? \n"
+      default: no
+      private: no
+    - name: "update_composer"
+      prompt: "\n\n Would you like to update composer packages? \n"
+      default: yes
+      private: no
+    - name: "refresh_sqs"
+      prompt: "\n\n Would you like to refresh SQS drivers? \n"
+      default: no
+      private: no
+
+  tasks:
+
+      # Fail if a deployer isn't set!
+    - name: "Check if username was provided?"
+      fail: msg="A name wasn't supplied when asked who was deploying..."
+      when: deployer == ''
+
+      # Fail if a message isn't set!
+    - name: "Check if a message was provided?"
+      fail: msg="A Message wasn't passed to the service, please append to let others know what you're doing..."
+      when: message == ''
+
+      # Kill SSH Agent to restart it and bind keys
+    - name: "Kill SSH Agent"
+      command: killall ssh-agent
+      ignore_errors: yes
+
+    - debug: msg="SSH Agent has been killed"
+
+      # Reenable SSH Agent to bind keys for git fetch
+    - name: "Enable SSH-AGENT"
+      shell: eval $(ssh-agent -s)
+      register: ssh-agent
+
+    - debug: msg="SSH Agent has been enabled"
+
+      # Send Slack Notification when deploying
+    - name: "Send notification message via Slack"
+      run_once: true
+      slack:
+        token: T02J7C19B/B0YH9R86T/24k90yFHu6GGOy7YTQHzEefE
+        username: "ACTIVEx {{ hosts }}"
+        icon_url: "https://bitbucket-assetroot.s3.amazonaws.com/c/photos/2016/Jan/22/472477332-1-verys-AC_avatar.png"
+        validate_certs: no
+        attachments:
+          - text: "@channel A person is currently deploying to {{ hosts }} \n"
+            color: good
+            title: "Deployment in progress..."
+            fields:
+              - title: "\nWho's deploying?"
+                value: '{{ deployer }}'
+              - title: "\nWhat are they deploying?"
+                value: '{{ message }}'
+                short: true
+
+      # Fetch the latest code for a project
+    - name: "Fetch the latest from Bitbucket"
+      git: repo=git@bitbucket.org:verys/{{ project }}.git dest=/opt/active/{{ location }} key_file={{ ssh_key_path }}
+           version={{ branch }}
+           update=yes
+           accept_hostkey=yes
+           force=yes
+      register: git
+
+      # Print out to the command line the before hash
+    - name: "Before git update"
+      debug: var=git.before
+
+      # Print out to the command line the after hash
+    - name: "After git update"
+      debug: var=git.after
+
+      # Clear the routes cache
+    - name: "Clear Routes Caches"
+      shell: php /opt/active/{{ location }}/artisan route:cache
+      register: routes
+
+    - debug: var=routes.stdout_lines
+
+      # Clear the view cache to ensure safety
+    - name: "Clear View Caches"
+      shell: php /opt/active/{{ location }}/artisan view:clear
+      register: view
+
+    - debug: var=view.stdout_lines
+
+    - name: "Self Update Composer"
+      shell: composer self-update -d /opt/active/{{ location }}
+      when: self_update_composer == 'True'
+      register: selfUpdate
+
+    - debug: var=selfUpdate.stdout_lines
+      when: self_update_composer == 'True'
+
+      # Update composer packages to get the latest
+    - name: "Composer update"
+      shell: composer update -d /opt/active/{{ location }}
+      register: composerUpdate
+      when: update_composer == 'True'
+
+    - debug: var=composerUpdate.stdout_lines
+      when: update_composer == 'True'
+
+      # Install any packages that don't already exists
+    - name: "Composer Install"
+      shell: composer install  -d /opt/active/{{ location }}
+      register: composerInstall
+      when: update_composer == 'True'
+
+    - debug: var=composerInstall.stdout_lines
+      when: update_composer == 'True'
+
+      # Check for new migrations and perform them!
+    - name: "Check for new migrations"
+      shell: php /opt/active/{{ location }}/artisan migrate --force
+      register: migrations_output
+      when: migrations == 'True'
+
+    - debug: var=migrations_output.stdout_lines
+      when: migrations == 'True'
+
+      # Rebuild ES cache if specified
+    - name: "Rebuild ES Caches"
+      shell: php /opt/active/{{ location }}/artisan rebuildes
+      register: es
+      when: rebuildes == 'True'
+
+    - debug: var=es.stdout_lines
+      when: rebuildes == 'True'
+
+      # Lets run gulp to update any files we might need
+    - name: "Run Gulp to update frontend"
+      command: gulp chdir=/opt/active/{{ location }}
+      register: gulp
+
+    - debug: var=gulp.stdout_lines
+
+      # Restart apache to be safe and ensure it's the latest & to break any cache busters
+    - name: "Restart apache"
+      service: name=httpd state=restarted
+      register: apache
+
+    - debug: var=apache.state
+
+      # Lets Refresh SQS drivers
+    - name: "Refresh SQS Workers"
+      command: supervisorctl restart all
+      register: sqs
+      when: refresh_sqs == 'True'
+
+    - debug: var=sqs.stdout_lines
+      when: refresh_sqs == 'True'
